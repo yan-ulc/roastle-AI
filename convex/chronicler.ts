@@ -1,115 +1,131 @@
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
-import type { Doc } from "./_generated/dataModel";
 import {
   internalAction,
   internalMutation,
   internalQuery,
+  query,
 } from "./_generated/server";
 
-export const dailyRecapAction = internalAction({
+export const getPastSummaries = query({
   args: { userId: v.string() },
   handler: async (ctx, args) => {
-    // 1. Ambil semua task user hari ini
-    const tasks: Doc<"tasks">[] = await ctx.runQuery(
-      internal.chronicler.getUserTasksToday,
-      {
-        userId: args.userId,
-      },
-    );
-
-    if (tasks.length === 0) return;
-
-    const completed = tasks.filter((t) => t.status === "completed").length;
-    const failed = tasks.filter(
-      (t) => t.status === "pending" || t.status === "failed",
-    ).length;
-
-    const taskSummary = tasks
-      .map((t) => `- ${t.originalTitle} (Status: ${t.status})`)
-      .join("\n");
-
-    // 2. Minta Gemini/Groq buat ngerangkum dosa (Pake logic fallback yang udah kita bikin)
-    const systemPrompt = `You are 'The Chronicler'. Your job is to summarize the user's day in one toxic paragraph.
-    Focus on their failures. If they finished tasks, belittle their achievements. 
-    Use Gen-Z slang: L, cooked, mid, NPC, blud. 
-    Stats: ${completed} finished, ${failed} failed.`;
-
-    const userPrompt = `Here is my task list today:\n${taskSummary}`;
-
-    const recapContent = await ctx.runAction(internal.ai.getRoastResponse, {
-      systemPrompt,
-      userPrompt,
-    });
-
-    // 3. Simpan ke tabel dailySummaries
-    await ctx.runMutation(internal.chronicler.saveDailySummary, {
-      userId: args.userId,
-      content:
-        recapContent ??
-        "User beneran gak ngapa-ngapain hari ini. Peak NPC behavior.",
-      stats: { completed, failed },
-    });
-  },
-});
-
-export const triggerAllUserRecaps = internalAction({
-  args: {},
-  handler: async (ctx): Promise<{ scheduled: number }> => {
-    const userIds: string[] = await ctx.runQuery(
-      internal.chronicler.listUsersForRecap,
-      {
-        limit: 200,
-      },
-    );
-
-    for (const userId of userIds) {
-      await ctx.scheduler.runAfter(0, internal.chronicler.dailyRecapAction, {
-        userId,
-      });
-    }
-
-    return { scheduled: userIds.length };
-  },
-});
-
-export const listUsersForRecap = internalQuery({
-  args: { limit: v.number() },
-  handler: async (ctx, args) => {
-    const recentTasks = await ctx.db
-      .query("tasks")
+    return await ctx.db
+      .query("dailySummaries")
+      .withIndex("by_user_date", (q) => q.eq("userId", args.userId))
       .order("desc")
-      .take(args.limit);
-    return Array.from(new Set(recentTasks.map((task) => task.userId)));
+      .take(3);
   },
 });
 
-// Helper Query & Mutation
-export const getUserTasksToday = internalQuery({
-  args: { userId: v.string() },
+export const dailyRecapAction = internalAction({
+  args: { userId: v.string(), dateStr: v.string() },
   handler: async (ctx, args) => {
-    // Logic ambil task 24 jam terakhir
-    const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+    const tasks = await ctx.runQuery(internal.chronicler.getTodayTasks, {
+      userId: args.userId,
+      dateStr: args.dateStr,
+    });
+
+    const done = tasks.filter((t) => t.status === "completed").length;
+    const fail = tasks.filter((t) => t.status !== "completed").length;
+
+    const systemPrompt = `You are 'The Chronicler'. Your job is to document this user's failure. 
+    Today's Stats: ${done} completed, ${fail} failed/pending. 
+    Use the specific task names: ${tasks.map((t) => t.originalTitle).join(", ")}. 
+    Write a 1-paragraph summary that is toxic, judgmental, and personal. Gen-Z slang only.`;
+
+    const summary = await ctx.runAction(internal.ai.askAI, {
+      systemPrompt,
+      userPrompt: "Recap my day.",
+    });
+
+    await ctx.runMutation(internal.chronicler.saveSummary, {
+      userId: args.userId,
+      dateStr: args.dateStr,
+      summary: summary ?? "User beneran gak ngapa-ngapain. Cooked.",
+      stats: { completed: done, failed: fail },
+    });
+  },
+});
+
+export const getTodayTasks = internalQuery({
+  args: { userId: v.string(), dateStr: v.string() },
+  handler: async (ctx, args) => {
     return await ctx.db
       .query("tasks")
-      .withIndex("by_user_status", (q) => q.eq("userId", args.userId))
-      .filter((q) => q.gt(q.field("createdAt"), oneDayAgo))
+      .withIndex("by_user_date", (q) =>
+        q.eq("userId", args.userId).eq("dateStr", args.dateStr),
+      )
       .collect();
   },
 });
 
-export const saveDailySummary = internalMutation({
+export const saveSummary = internalMutation({
   args: {
     userId: v.string(),
-    content: v.string(),
-    stats: v.object({ completed: v.number(), failed: v.number() }),
+    dateStr: v.string(),
+    summary: v.string(),
+    stats: v.any(),
   },
   handler: async (ctx, args) => {
-    await ctx.db.insert("dailySummaries", {
-      userId: args.userId,
-      content: args.content,
-      date: new Date().toISOString().split("T")[0],
-      severity: args.stats.failed > args.stats.completed ? 10 : 5,
-    });
+    // Cari apakah sudah ada summary hari ini (buat update)
+    const existing = await ctx.db
+      .query("dailySummaries")
+      .withIndex("by_user_date", (q) =>
+        q.eq("userId", args.userId).eq("dateStr", args.dateStr),
+      )
+      .first();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        summary: args.summary,
+        stats: args.stats,
+      });
+    } else {
+      await ctx.db.insert("dailySummaries", {
+        userId: args.userId,
+        dateStr: args.dateStr,
+        summary: args.summary,
+        stats: args.stats,
+      });
+    }
+  },
+});
+
+// Tambahkan di convex/chronicler.ts
+
+export const triggerAllUserRecaps = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const today = new Date().toISOString().split("T")[0];
+
+    // 1. Ambil semua task yang dibuat hari ini biar tau user mana aja yang aktif
+    const activeTasks = await ctx.db
+      .query("tasks")
+      // Kita pake filter karena kita mau ambil semua user unik hari ini
+      .filter((q) => q.eq(q.field("dateStr"), today))
+      .collect();
+
+    // 2. Ambil list unik userId
+    const activeUserIds = Array.from(new Set(activeTasks.map((t) => t.userId)));
+
+    // 3. Untuk setiap user, cek apakah mereka sudah punya 'final summary'
+    for (const userId of activeUserIds) {
+      const summary = await ctx.db
+        .query("dailySummaries")
+        .withIndex("by_user_date", (q) =>
+          q.eq("userId", userId).eq("dateStr", today),
+        )
+        .first();
+
+      // Kalau belum ada summary atau belum final (karena mereka kabur/malas)
+      // Kita paksa Agent 2 buat nge-recap sekarang.
+      if (!summary) {
+        await ctx.scheduler.runAfter(0, internal.chronicler.dailyRecapAction, {
+          userId,
+          dateStr: today,
+        });
+      }
+    }
   },
 });
