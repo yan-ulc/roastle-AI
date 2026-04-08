@@ -53,13 +53,14 @@ export const getTodayTasks = internalQuery({
   handler: async (ctx, args) => {
     return await ctx.db
       .query("tasks")
-      .withIndex("by_user_date", (q) =>
+      .withIndex("by_user_date_order", (q) =>
         q.eq("userId", args.userId).eq("dateStr", args.dateStr),
       )
       .collect();
   },
 });
 
+// Di convex/chronicler.ts pada mutation saveSummary
 export const saveSummary = internalMutation({
   args: {
     userId: v.string(),
@@ -68,7 +69,7 @@ export const saveSummary = internalMutation({
     stats: v.any(),
   },
   handler: async (ctx, args) => {
-    // Cari apakah sudah ada summary hari ini (buat update)
+    // Cari apakah sudah ada summary buat user ini di hari ini
     const existing = await ctx.db
       .query("dailySummaries")
       .withIndex("by_user_date", (q) =>
@@ -77,11 +78,13 @@ export const saveSummary = internalMutation({
       .first();
 
     if (existing) {
+      // Jika ada, timpa dengan yang baru (Recap Terupdate)
       await ctx.db.patch(existing._id, {
         summary: args.summary,
         stats: args.stats,
       });
     } else {
+      // Jika belum ada, buat baru
       await ctx.db.insert("dailySummaries", {
         userId: args.userId,
         dateStr: args.dateStr,
