@@ -9,7 +9,7 @@ import { TaskCard } from "../../../components/ui/custom/TaskCard";
 export default function Dashboard() {
   const { user } = useUser();
   const [taskTitle, setTaskTitle] = useState("");
-  const createTask = useMutation(api.task.createTask);
+  const saveDailyPlan = useMutation(api.task.saveDailyPlan);
   const tasks = useQuery(api.task.getMyTasks, {
     userId: user?.id ?? "",
   });
@@ -18,7 +18,17 @@ export default function Dashboard() {
     e.preventDefault();
     if (!taskTitle || !user) return;
 
-    await createTask({ title: taskTitle, userId: user.id });
+    await saveDailyPlan({
+      userId: user.id,
+      tasks: [
+        {
+          originalTitle: taskTitle,
+          startTime: "08:00",
+          duration: 30,
+          order: 1,
+        },
+      ],
+    });
     setTaskTitle("");
   };
 

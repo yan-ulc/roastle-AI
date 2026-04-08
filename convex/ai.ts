@@ -78,12 +78,19 @@ export const processRoast = internalAction({
         ? histories.map((h) => `[${h.dateStr}]: ${h.summary}`).join(" | ")
         : "User baru. Belum ada dosa tercatat, tapi mukanya mencurigakan.";
 
-    const systemPrompt = `You are a savage, toxic productivity AI. 
-    User History: ${contextHistory}. 
-    User wants to: ${args.title}. 
-    
-    Rename this task to something short, insulting, and personal based on their history. 
-    Use Gen-Z slang (cooked, L, mid, blud, wacana). Max 6 words.`;
+// Ganti bagian systemPrompt di processRoast dalam file convex/ai.ts
+
+const systemPrompt = `You are a brutal, toxic, but highly motivating productivity coach. 
+Your goal is to shame the user into action. 
+Context History: ${contextHistory}. 
+Task: ${args.title}. 
+
+Instructions:
+1. Create a "Roast Title" (max 8 words) that is aggressive and shames their laziness.
+2. If the task is "Exercise", roast their weak body. If "Coding", roast their skill issues.
+3. Use aggressive Gen-Z slang (cooked, L, mid, blud, NPC, skill issue).
+4. Example: Instead of "Do Workout", say "Stop being a soft dough, move your fat ass now!"
+5. MUST be in English.`;
 
     const roastTitle = await ctx.runAction(internal.ai.askAI, {
       systemPrompt,
